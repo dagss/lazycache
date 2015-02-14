@@ -3,6 +3,14 @@
 Python tool to cache computations by constructing lazy computation trees,
 then use them as keys into a cache.
 
+## Example
+
+```
+>>> x = lazy(np.zeros(1000), own=True)
+>>> x
+<lazy 23r5fs ndarray(shape=(1000,), dtype=float64)>
+
+
 
 ## computed
 
