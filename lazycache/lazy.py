@@ -1,14 +1,20 @@
 import operator
 import numpy as np
-import joblib.hashing
 import struct
+import hashlib
+from binascii import hexlify
+from . import hashing
 
 
 HASH_FUNCTION = 'sha256'
 
 
-def shash(x):
-    return joblib.hashing.hash(x, hash_name=HASH_FUNCTION, coerce_mmap=True)
+def secure_hash_digest(x):
+    return hashing.hash(x, hash_name=HASH_FUNCTION, coerce_mmap=True).digest()
+
+
+def make_hasher():
+    return hashlib.new(HASH_FUNCTION)
 
 
 immutable_scalars = {
@@ -28,7 +34,7 @@ def is_immutable(x):
 def should_inline_repr(x):
     return (type(x) in immutable_scalars
             and not (isinstance(x, basestring) and len(x) > 10))
-    
+
 
 short_reprs = {
     np.ndarray: lambda x: 'ndarray(shape=%r, dtype=%s)' % (x.shape, str(x.dtype))
@@ -38,14 +44,6 @@ short_reprs = {
 def short_repr(x):
     formatter = short_reprs.get(type(x), repr)
     return formatter(x)
-
-
-class ValueRef(object):
-    def __init__(self, value, own):
-        self.value = value
-        self.immutable = is_immutable(value)
-        self.own = own or self.immutable
-        self.hash = shash(value)
 
 
 class BaseExpr(object):
@@ -58,38 +56,42 @@ class Expr(BaseExpr):
         self.func_hash = func_hash
         self.func = func
         self.args = args
+        h = make_hasher()
+        h.update(func_hash)
+        for arg in args:
+            h.update(arg.hash)
+        self.hash = h.digest()
 
-    def format(self, vars, varnames):
-        arg_strs = [arg.format(vars, varnames) for arg in self.args]
+    def format(self, varnames):
+        arg_strs = [arg.format(varnames) for arg in self.args]
         return '%s(%s)' % (self.func_name, ', '.join(arg_strs))
 
-    def serialize_for_hash(self, values):
-        return (self.func_hash,) + tuple(arg.serialize_for_hash(values) for arg in self.args)
-
-    def compute(self, vars):
-        computed_args = [arg.compute(vars) for arg in self.args]
+    def compute(self):
+        computed_args = [arg.compute() for arg in self.args]
         return self.func(*computed_args)
 
 
 class InfixExpr(Expr):
-    def format(self, vars, varnames):
-        arg_strs = [arg.format(vars, varnames) for arg in self.args] 
+    def format(self, varnames):
+        arg_strs = [arg.format(varnames) for arg in self.args]
         return '(%s)' % (' %s ' % self.func_name).join(arg_strs)
 
 
 class Leaf(BaseExpr):
-    def __init__(self):
-        pass
+    def __init__(self, value, own):
+        self.value = value
+        self.immutable = is_immutable(value)
+        self.own = own or self.immutable
+        self.hash = secure_hash_digest(value)
 
-    def compute(self, vars):
-        return vars[self].value
+    def compute(self):
+        return self.value
 
-    def format(self, vars, varnames):
+    def format(self, varnames):
         name = varnames.get(self, None)
         if name is None:
-            value = vars[self]
-            if should_inline_repr(value.value):
-                name = repr(value.value)
+            if should_inline_repr(self.value):
+                name = repr(self.value)
             else:
                 name = varnames[self] = 'v%d' % len(varnames)
         return name
@@ -100,53 +102,41 @@ class Leaf(BaseExpr):
 
 def binop_impl(name, func):
     def method(self, other):
-        other = lazy(other)
-        vars = dict(self.vars)
-        vars.update(other.vars)
-        return Lazy(InfixExpr(name, name, func, (self.expr, other.expr)), vars)
+        return Lazy(InfixExpr(name, name, func, (self.expr, lazy(other).expr)))
     return method
 
 
 def rbinop_impl(name, func):
     def method(self, other):
-        other = lazy(other)
-        vars = dict(self.vars)
-        vars.update(other.vars)
-        return Lazy(InfixExpr(name, name, func, (other.expr, self.expr)), vars)
+        return Lazy(InfixExpr(name, name, func, (lazy(other).expr, self.expr)))
     return method
 
-    
+
 class Lazy(object):
 
-    def __init__(self, expr, vars):
+    def __init__(self, expr):
         self.expr = expr
-        self.vars = vars
 
-    def __secure_hash__(self):
-        if isinstance(self.expr, Leaf):
-            return self.vars[self.expr].hash
-        else:
-            return shash(self.expr.serialize_for_hash(self.vars))
+    def _secure_hash(self):
+        return self.expr.hash
 
     def __compute__(self):
-        return self.expr.compute(self.vars)
+        return self.expr.compute()
 
     def __repr__(self):
         if isinstance(self.expr, Leaf):
-            val = self.vars[self.expr]
-            return '<lazy %s %s>' % (val.hash[:6], short_repr(val.value))
+            return '<lazy %s %s>' % (hexlify(self.expr.hash[:3]), short_repr(self.expr.value))
         else:
-            hashval = self.__secure_hash__()
+            hashval = self._secure_hash()
             varnames = {}
-            expr_repr = self.expr.format(self.vars, varnames)
+            expr_repr = self.expr.format(varnames)
             vars_reprs = []
-            node_and_name_list = varnames.items()
-            node_and_name_list.sort(key=lambda tup: tup[1])  # sort by varname
-            for node, name in node_and_name_list:
-                val = self.vars[node]
-                vars_reprs.append('  %s: %s %s' % (name, val.hash[:6], short_repr(val.value)))
+            leaf_and_name_list = varnames.items()
+            leaf_and_name_list.sort(key=lambda tup: tup[1])  # sort by varname
+            for leaf, name in leaf_and_name_list:
+                vars_reprs.append('  %s: %s %s' % (name, hexlify(leaf.hash[:3]), short_repr(leaf.value)))
             return '<lazy {hash}\n\n  {expr}\n\nwith:\n\n{vars}\n)'.format(
-                hash=hashval[:6], expr=expr_repr, vars='\n'.join(vars_reprs))
+                hash=hexlify(hashval[:3]), expr=expr_repr, vars='\n'.join(vars_reprs))
 
     __add__ = binop_impl('+', operator.add)
     __sub__ = binop_impl('-', operator.sub)
@@ -163,9 +153,7 @@ def lazy(value, own=False):
     if isinstance(value, Lazy):
         return value
     else:
-        expr = Leaf()
-        vars = {expr: ValueRef(value, own)}
-        return Lazy(expr, vars)
+        return Lazy(Leaf(value, own))
 
 
 def compute(x):
