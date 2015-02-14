@@ -207,6 +207,16 @@ with
 
 (registering your own types)
 
+## Authors
+
+lazycache.hashing is copied from joblib by Gael Varoquaux et al.,
+https://github.com/joblib/joblib/
+
+The remainder of lazycache is written by:
+
+* Dag Sverre Seljebotn
+
+
 ## Licensing
 
 lazycache is **BSD-licenced** (3 clause):
